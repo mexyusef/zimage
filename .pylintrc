@@ -1,0 +1,7 @@
+[MASTER]
+# Ignore PyQt6 no-name-in-module errors
+disable=no-name-in-module
+
+[MESSAGES CONTROL]
+# Disable other specific messages
+disable=no-name-in-module,import-error

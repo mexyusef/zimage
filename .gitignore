@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# C extensions
+*.egg-info
+dist/
+build/
+.eggs/
+*.egg
+
+# Packages that should not be tracked
+.venv/
+venv/
+env/
+virtualenv/
+
+# IDE files
+.idea/
+*.iml
+*.suo
+*.csproj
+*.sln
+*.user
+*.userprefs
+
+# Package management
+.env
+requirements.txt  # Consider adding this if you manage dependencies in a different way
+Pipfile
+Pipfile.lock
+
+# Testing
+.pytest_cache/
+.tox/
+nosetests.xml
+
+# Jupyter Notebook files
+*.ipynb_checkpoints
+
+# Local configuration files
+.vscode/
+.gitattributes
+
+# Other temporary files
+*.log
+*.tmp
+Thumbs.db
+*.DS_Store
+/_legacy/
