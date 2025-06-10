@@ -171,6 +171,7 @@ class ToolType(Enum):
     RECTANGLE = auto()
     ELLIPSE = auto()
     TEXT = auto()
+    BLUR = auto()
     SELECT = auto()
     CROP = auto()
     EYEDROPPER = auto()

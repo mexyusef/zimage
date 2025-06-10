@@ -1,3 +1,4 @@
 """
-Editor UI components for ZImage Enterprise
+Editor package for ZImage Enterprise
 """
+from zimage.ui.editor.editor_tab import EditorTab

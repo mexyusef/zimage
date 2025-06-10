@@ -14,6 +14,9 @@ from PyQt6.QtGui import (
     QMouseEvent, QWheelEvent, QTransform, QCursor, QFont
 )
 
+# Import low-level color functions
+from PyQt6.QtGui import qRed, qGreen, qBlue, qRgba, qAlpha
+
 from zimage.core.constants import (
     ICONS_DIR, BRUSH_SIZE_MIN, BRUSH_SIZE_MAX, ToolType,
     PRIMARY_COLOR, PRIMARY_LIGHT_COLOR, TEXT_COLOR
@@ -27,6 +30,9 @@ class CanvasWidget(QLabel):
     """
     Custom widget for the drawing canvas with direct painting support
     """
+    # Define signals
+    status_message = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
@@ -41,6 +47,8 @@ class CanvasWidget(QLabel):
         self.brush_color = QColor(Qt.GlobalColor.black)
         self.active_tool = ToolType.PEN
         self.text_font = QFont("Arial", 12)
+        self.blur_radius = 10
+        self.blur_type = "gaussian"
         self.setText("No image loaded")
         self.setStyleSheet("background-color: #222222; color: white;")
 
@@ -74,6 +82,8 @@ class CanvasWidget(QLabel):
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif tool == ToolType.TEXT:
             self.setCursor(Qt.CursorShape.IBeamCursor)
+        elif tool == ToolType.BLUR:
+            self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
@@ -91,6 +101,14 @@ class CanvasWidget(QLabel):
     def set_font(self, font):
         """Set the text font"""
         self.text_font = font
+
+    def set_blur_radius(self, radius):
+        """Set the blur radius"""
+        self.blur_radius = radius
+
+    def set_blur_type(self, blur_type):
+        """Set the blur type"""
+        self.blur_type = blur_type
 
     def update_display(self):
         """Update the display with current zoom factor"""
@@ -142,7 +160,7 @@ class CanvasWidget(QLabel):
         self.start_point = pos
 
         # For tools that need a preview, make a copy of the current pixmap
-        if self.active_tool in [ToolType.LINE, ToolType.RECTANGLE, ToolType.ELLIPSE]:
+        if self.active_tool in [ToolType.LINE, ToolType.RECTANGLE, ToolType.ELLIPSE, ToolType.BLUR]:
             self.temp_pixmap = self.pixmap.copy()
 
         # Handle different tools
@@ -153,15 +171,42 @@ class CanvasWidget(QLabel):
             # For text, show input dialog
             text, ok = QInputDialog.getText(self, "Add Text", "Enter text:")
             if ok and text:
-                painter = QPainter(self.image)
+                painter = QPainter()
+                if not painter.begin(self.image):
+                    logger.error("Failed to begin painting on image for text")
+                    return
+
                 painter.setPen(QPen(self.brush_color))
                 painter.setFont(self.text_font)
                 painter.drawText(pos, text)
                 painter.end()
+                del painter  # Explicitly delete the painter
 
                 # Update pixmap and display
                 self.pixmap = QPixmap.fromImage(self.image)
                 self.update_display()
+
+            # Reset drawing state
+            self.drawing = False
+        elif self.active_tool == ToolType.BLUR and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            try:
+                # Status update before processing
+                self.status_message.emit(f"Applying {self.blur_type} blur to entire image...")
+
+                # Apply blur to the entire image when Ctrl is pressed
+                self._apply_blur_to_image()
+
+                # Update pixmap after blur
+                if self.image:
+                    self.pixmap = QPixmap.fromImage(self.image)
+                    self.update_display()
+
+                # Emit status message
+                self.status_message.emit(f"Applied {self.blur_type} blur to entire image (radius: {self.blur_radius})")
+            except Exception as e:
+                import traceback
+                logger.error(f"Error applying blur to entire image: {str(e)}\n{traceback.format_exc()}")
+                self.status_message.emit(f"Error applying blur: {str(e)}")
 
             # Reset drawing state
             self.drawing = False
@@ -203,30 +248,88 @@ class CanvasWidget(QLabel):
                 Qt.TransformationMode.SmoothTransformation
             )
             self.setPixmap(scaled_preview)
+        elif self.active_tool == ToolType.BLUR:
+            # For blur, draw a preview of the blur region
+            preview = self.temp_pixmap.copy()
+            painter = QPainter(preview)
+            painter.setPen(QPen(QColor(255, 255, 0), 1, Qt.PenStyle.DashLine))
+
+            # Draw the blur region rectangle
+            rect = QRect(
+                min(self.start_point.x(), pos.x()),
+                min(self.start_point.y(), pos.y()),
+                abs(pos.x() - self.start_point.x()),
+                abs(pos.y() - self.start_point.y())
+            )
+            painter.drawRect(rect)
+
+            # Update display with preview
+            scaled_preview = preview.scaled(
+                int(preview.width() * self.zoom_factor),
+                int(preview.height() * self.zoom_factor),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.setPixmap(scaled_preview)
 
     def mouseReleaseEvent(self, event):
         """Handle mouse release events"""
-        if not self.drawing or self.image is None or event.button() != Qt.MouseButton.LeftButton:
+        if not self.drawing or self.image is None:
             return
 
         # Convert mouse position to image coordinates
         pos = self._map_to_image(event.pos())
 
-        # Handle different tools
-        if self.active_tool == ToolType.LINE:
-            self._draw_line(self.start_point, pos)
-        elif self.active_tool == ToolType.RECTANGLE:
-            self._draw_rectangle(self.start_point, pos)
-        elif self.active_tool == ToolType.ELLIPSE:
-            self._draw_ellipse(self.start_point, pos)
+        try:
+            # Handle different tools
+            if self.active_tool == ToolType.LINE:
+                self._draw_line(self.start_point, pos)
+            elif self.active_tool == ToolType.RECTANGLE:
+                self._draw_rectangle(self.start_point, pos)
+            elif self.active_tool == ToolType.ELLIPSE:
+                self._draw_ellipse(self.start_point, pos)
+            elif self.active_tool == ToolType.BLUR:
+                # Make sure we're handling a minimum size selection
+                if abs(pos.x() - self.start_point.x()) < 5 or abs(pos.y() - self.start_point.y()) < 5:
+                    # Selection too small, don't apply blur
+                    self.status_message.emit("Selection too small for blur. Please select a larger area.")
+                else:
+                    try:
+                        # Get region size for status message
+                        width = abs(pos.x() - self.start_point.x())
+                        height = abs(pos.y() - self.start_point.y())
 
-        # Stop drawing
+                        # Status update before processing
+                        self.status_message.emit(f"Applying {self.blur_type} blur to region...")
+
+                        # Apply blur
+                        self._apply_blur_to_region(self.start_point, pos)
+
+                        # Update pixmap only after blur is complete
+                        if self.image:  # Make sure image still exists
+                            self.pixmap = QPixmap.fromImage(self.image)
+                            self.update_display()
+
+                        # Send status message
+                        self.status_message.emit(f"Applied {self.blur_type} blur to region {width}x{height} (radius: {self.blur_radius})")
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"Error applying region blur: {str(e)}\n{traceback.format_exc()}")
+                        self.status_message.emit(f"Error applying blur: {str(e)}")
+
+            # Update pixmap and display for non-blur tools
+            if self.active_tool != ToolType.BLUR and self.image:
+                self.pixmap = QPixmap.fromImage(self.image)
+                self.update_display()
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in mouseReleaseEvent: {str(e)}\n{traceback.format_exc()}")
+            self.status_message.emit(f"Error processing action: {str(e)}")
+
+        # End drawing
         self.drawing = False
         self.temp_pixmap = None
-
-        # Update pixmap and display
-        self.pixmap = QPixmap.fromImage(self.image)
-        self.update_display()
 
     def wheelEvent(self, event):
         """Handle mouse wheel events for zooming"""
@@ -271,12 +374,17 @@ class CanvasWidget(QLabel):
         if self.image is None:
             return
 
-        painter = QPainter(self.image)
+        painter = QPainter()
+        if not painter.begin(self.image):
+            logger.error("Failed to begin painting on image for point")
+            return
+
         painter.setPen(QPen(self.brush_color, self.brush_size,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
         painter.drawPoint(pos)
         painter.end()
+        del painter  # Explicitly delete the painter
 
         # Update pixmap and display
         self.pixmap = QPixmap.fromImage(self.image)
@@ -287,12 +395,17 @@ class CanvasWidget(QLabel):
         if self.image is None:
             return
 
-        painter = QPainter(self.image)
+        painter = QPainter()
+        if not painter.begin(self.image):
+            logger.error("Failed to begin painting on image for line")
+            return
+
         painter.setPen(QPen(self.brush_color, self.brush_size,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
         painter.drawLine(start, end)
         painter.end()
+        del painter  # Explicitly delete the painter
 
         # Update pixmap and display
         self.pixmap = QPixmap.fromImage(self.image)
@@ -303,12 +416,17 @@ class CanvasWidget(QLabel):
         if self.image is None:
             return
 
-        painter = QPainter(self.image)
+        painter = QPainter()
+        if not painter.begin(self.image):
+            logger.error("Failed to begin painting on image for rectangle")
+            return
+
         painter.setPen(QPen(self.brush_color, self.brush_size,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
         painter.drawRect(QRect(start, end))
         painter.end()
+        del painter  # Explicitly delete the painter
 
         # Update pixmap and display
         self.pixmap = QPixmap.fromImage(self.image)
@@ -319,12 +437,17 @@ class CanvasWidget(QLabel):
         if self.image is None:
             return
 
-        painter = QPainter(self.image)
+        painter = QPainter()
+        if not painter.begin(self.image):
+            logger.error("Failed to begin painting on image for ellipse")
+            return
+
         painter.setPen(QPen(self.brush_color, self.brush_size,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
         painter.drawEllipse(QRect(start, end))
         painter.end()
+        del painter  # Explicitly delete the painter
 
         # Update pixmap and display
         self.pixmap = QPixmap.fromImage(self.image)
@@ -341,6 +464,205 @@ class CanvasWidget(QLabel):
     def _draw_preview_ellipse(self, painter, start, end):
         """Draw a preview ellipse"""
         painter.drawEllipse(QRect(start, end))
+
+    def _apply_blur_to_region(self, start, end):
+        """Apply blur to a specific region of the image"""
+        if self.image is None:
+            return
+
+        try:
+            # Create rectangle from selection points
+            rect = QRect(
+                min(start.x(), end.x()),
+                min(start.y(), end.y()),
+                abs(end.x() - start.x()),
+                abs(end.y() - start.y())
+            )
+
+            # Apply the simple blur algorithm
+            self._very_simple_blur(rect)
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in _apply_blur_to_region: {str(e)}\n{traceback.format_exc()}")
+            self.status_message.emit(f"Error applying blur: {str(e)}")
+
+    def _apply_blur_to_image(self):
+        """Apply blur to the entire image"""
+        if self.image is None:
+            return
+
+        try:
+            # Create rectangle for entire image
+            rect = QRect(0, 0, self.image.width(), self.image.height())
+
+            # Apply the simple blur algorithm
+            self._very_simple_blur(rect)
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in _apply_blur_to_image: {str(e)}\n{traceback.format_exc()}")
+            self.status_message.emit(f"Error applying blur: {str(e)}")
+
+    def _very_simple_blur(self, rect):
+        """Extremely simple and reliable blur implementation"""
+        try:
+            # Make a complete copy of the source image
+            source = QImage(self.image)
+
+            # Create a new result image with same dimensions
+            result = QImage(source.size(), source.format())
+            result.fill(Qt.GlobalColor.transparent)  # Start with transparent background
+
+            # Copy the entire source image to the result first
+            painter = QPainter()
+            if not painter.begin(result):
+                logger.error("Failed to begin painting on result image")
+                return
+
+            painter.drawImage(0, 0, source)
+            painter.end()
+            del painter  # Explicitly delete the painter
+
+            # Extract rect coordinates
+            x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+
+            # Ensure the rectangle is valid
+            x = max(0, min(x, source.width() - 1))
+            y = max(0, min(y, source.height() - 1))
+            w = min(w, source.width() - x)
+            h = min(h, source.height() - y)
+
+            if w <= 1 or h <= 1:
+                return
+
+            # Create temporary image for the blurred region
+            temp_blur = QImage(w, h, source.format())
+            temp_blur.fill(Qt.GlobalColor.transparent)  # Start with transparent background
+
+            # Define blur radius based on type
+            radius = self.blur_radius
+            if radius < 1:
+                radius = 1
+            elif radius > 20:
+                radius = 20  # Limit for performance
+
+            # Apply appropriate blur algorithm
+            if self.blur_type == "gaussian" or self.blur_type == "box":
+                # Box blur (simpler and more reliable)
+                for py in range(h):
+                    for px in range(w):
+                        # Initialize color components
+                        r_sum, g_sum, b_sum, a_sum = 0, 0, 0, 0
+                        count = 0
+
+                        # Calculate average of surrounding pixels
+                        for dy in range(-radius, radius + 1):
+                            for dx in range(-radius, radius + 1):
+                                # Calculate source pixel coordinates
+                                sx = x + px + dx
+                                sy = y + py + dy
+
+                                # Check if coordinates are valid
+                                if 0 <= sx < source.width() and 0 <= sy < source.height():
+                                    # Get pixel color
+                                    pixel = source.pixel(sx, sy)
+
+                                    # Sum color components
+                                    r_sum += qRed(pixel)
+                                    g_sum += qGreen(pixel)
+                                    b_sum += qBlue(pixel)
+                                    a_sum += qAlpha(pixel)
+
+                                    count += 1
+
+                        # Calculate average color
+                        if count > 0:
+                            r_avg = r_sum // count
+                            g_avg = g_sum // count
+                            b_avg = b_sum // count
+                            a_avg = a_sum // count
+
+                            # Create final pixel color
+                            pixel_color = qRgba(r_avg, g_avg, b_avg, a_avg)
+
+                            # Set pixel in temporary image
+                            temp_blur.setPixel(px, py, pixel_color)
+
+            elif self.blur_type == "motion":
+                # Simple horizontal motion blur
+                for py in range(h):
+                    for px in range(w):
+                        # Initialize color components
+                        r_sum, g_sum, b_sum, a_sum = 0, 0, 0, 0
+                        count = 0
+
+                        # Sample only horizontally for motion effect
+                        for dx in range(-radius, radius + 1):
+                            # Calculate source pixel coordinates
+                            sx = x + px + dx
+                            sy = y + py
+
+                            # Check if coordinates are valid
+                            if 0 <= sx < source.width() and 0 <= sy < source.height():
+                                # Get pixel color
+                                pixel = source.pixel(sx, sy)
+
+                                # Sum color components
+                                r_sum += qRed(pixel)
+                                g_sum += qGreen(pixel)
+                                b_sum += qBlue(pixel)
+                                a_sum += qAlpha(pixel)
+
+                                count += 1
+
+                        # Calculate average color
+                        if count > 0:
+                            r_avg = r_sum // count
+                            g_avg = g_sum // count
+                            b_avg = b_sum // count
+                            a_avg = a_sum // count
+
+                            # Create final pixel color
+                            pixel_color = qRgba(r_avg, g_avg, b_avg, a_avg)
+
+                            # Set pixel in temporary image
+                            temp_blur.setPixel(px, py, pixel_color)
+
+            # Draw the blurred region onto the result image
+            result_painter = QPainter()
+            if not result_painter.begin(result):
+                logger.error("Failed to begin painting on result image for blur region")
+                return
+
+            result_painter.drawImage(x, y, temp_blur)
+            result_painter.end()
+            del result_painter  # Explicitly delete the painter
+
+            # Important: Make sure all painter objects are fully cleaned up before replacing the image
+            temp_blur = None  # Release temp_blur
+
+            # Replace the original image with the result
+            self.image = result
+
+            # Update the pixmap from the new image
+            self.pixmap = QPixmap.fromImage(self.image)
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Error in _very_simple_blur: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    # Add back stubs for the original functions for compatibility
+    def _apply_gaussian_blur(self, rect):
+        """Apply Gaussian blur to a region of the image"""
+        self._very_simple_blur(rect)
+
+    def _apply_box_blur(self, rect):
+        """Apply box blur to a region of the image"""
+        self._very_simple_blur(rect)
+
+    def _apply_motion_blur(self, rect):
+        """Apply motion blur to a region of the image"""
+        self._very_simple_blur(rect)
 
 class EditorTab(QWidget):
     """
@@ -382,16 +704,68 @@ class EditorTab(QWidget):
         content_layout = QHBoxLayout()
         layout.addLayout(content_layout)
 
-        # Create tool panel (left side)
+        # Create tool panel (left side) with scrollable area
+        tool_panel_container = QScrollArea()
+        tool_panel_container.setWidgetResizable(True)
+        tool_panel_container.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tool_panel_container.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        tool_panel_container.setStyleSheet("""
+            QScrollArea {
+                background-color: #333333;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background-color: #444444;
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #666666;
+                min-height: 20px;
+                border-radius: 6px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                background: none;
+                height: 0px;
+            }
+        """)
+
         tool_panel = QWidget()
+        tool_panel.setMinimumWidth(180)
         tool_panel.setMaximumWidth(200)
-        tool_panel.setStyleSheet(f"background-color: #333333; color: white; padding: 10px;")
+        tool_panel.setStyleSheet(f"background-color: #333333; color: white;")
         tool_layout = QVBoxLayout(tool_panel)
+        tool_layout.setSpacing(12)  # Increase spacing between elements
+        tool_layout.setContentsMargins(10, 15, 10, 15)  # Add more padding
+
+        tool_panel_container.setWidget(tool_panel)
 
         # Tool selection header
         tools_header = QLabel("Tools:")
         tools_header.setStyleSheet("font-weight: bold; font-size: 14px; color: white;")
         tool_layout.addWidget(tools_header)
+
+        # Button style sheets
+        button_style = """
+            QPushButton {
+                background-color: #444444;
+                color: white;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 8px 12px;
+                font-weight: bold;
+                min-width: 80px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #555555;
+                border: 1px solid #666666;
+            }
+            QPushButton:pressed, QPushButton:checked {
+                background-color: #E86C00;
+                border: 1px solid #FF8C30;
+            }
+        """
 
         # Tool buttons in a grid
         tools_layout = QHBoxLayout()
@@ -400,12 +774,14 @@ class EditorTab(QWidget):
         self.pen_button = QPushButton("Pen")
         self.pen_button.setCheckable(True)
         self.pen_button.setChecked(True)  # Default tool
+        self.pen_button.setStyleSheet(button_style)
         self.pen_button.clicked.connect(lambda: self._on_tool_selected(ToolType.PEN))
         tools_layout.addWidget(self.pen_button)
 
         # Line tool button
         self.line_button = QPushButton("Line")
         self.line_button.setCheckable(True)
+        self.line_button.setStyleSheet(button_style)
         self.line_button.clicked.connect(lambda: self._on_tool_selected(ToolType.LINE))
         tools_layout.addWidget(self.line_button)
 
@@ -416,12 +792,14 @@ class EditorTab(QWidget):
         # Rectangle tool button
         self.rect_button = QPushButton("Rectangle")
         self.rect_button.setCheckable(True)
+        self.rect_button.setStyleSheet(button_style)
         self.rect_button.clicked.connect(lambda: self._on_tool_selected(ToolType.RECTANGLE))
         tools_layout2.addWidget(self.rect_button)
 
         # Ellipse tool button
         self.ellipse_button = QPushButton("Ellipse")
         self.ellipse_button.setCheckable(True)
+        self.ellipse_button.setStyleSheet(button_style)
         self.ellipse_button.clicked.connect(lambda: self._on_tool_selected(ToolType.ELLIPSE))
         tools_layout2.addWidget(self.ellipse_button)
 
@@ -430,11 +808,28 @@ class EditorTab(QWidget):
         # Text tool button
         self.text_button = QPushButton("Text")
         self.text_button.setCheckable(True)
+        self.text_button.setStyleSheet(button_style)
         self.text_button.clicked.connect(lambda: self._on_tool_selected(ToolType.TEXT))
         tool_layout.addWidget(self.text_button)
 
+        # Blur tool button
+        self.blur_button = QPushButton("Blur")
+        self.blur_button.setCheckable(True)
+        self.blur_button.setStyleSheet(button_style)
+        self.blur_button.clicked.connect(lambda: self._on_tool_selected(ToolType.BLUR))
+        tool_layout.addWidget(self.blur_button)
+
+        # Add a separator
+        separator = QWidget()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet("background-color: #555555;")
+        tool_layout.addWidget(separator)
+
         # Brush size
-        tool_layout.addWidget(QLabel("Brush Size:"))
+        brush_size_label = QLabel("Brush Size:")
+        brush_size_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        tool_layout.addWidget(brush_size_label)
+
         brush_size_layout = QHBoxLayout()
         self.brush_size_spin = QSpinBox()
         self.brush_size_spin.setRange(BRUSH_SIZE_MIN, BRUSH_SIZE_MAX)
@@ -443,6 +838,7 @@ class EditorTab(QWidget):
             background-color: #444444;
             color: white;
             border: 1px solid #555555;
+            padding: 3px;
         """)
         self.brush_size_spin.valueChanged.connect(self._on_brush_size_changed)
         brush_size_layout.addWidget(self.brush_size_spin)
@@ -455,41 +851,144 @@ class EditorTab(QWidget):
         tool_layout.addLayout(brush_size_layout)
 
         # Color selection
-        tool_layout.addWidget(QLabel("Brush Color:"))
+        color_label = QLabel("Brush Color:")
+        color_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        tool_layout.addWidget(color_label)
+
         self.color_button = QPushButton()
-        self.color_button.setStyleSheet(f"background-color: {self.brush_color}; min-height: 30px;")
+        self.color_button.setStyleSheet(f"""
+            background-color: {self.brush_color};
+            min-height: 30px;
+            border: 2px solid #555555;
+            border-radius: 4px;
+        """)
         self.color_button.setMaximumWidth(100)
         self.color_button.clicked.connect(self._on_color_button_clicked)
         tool_layout.addWidget(self.color_button)
 
         # Background color
-        tool_layout.addWidget(QLabel("Background Color:"))
+        bg_color_label = QLabel("Background Color:")
+        bg_color_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        tool_layout.addWidget(bg_color_label)
+
         self.bg_color_button = QPushButton()
-        self.bg_color_button.setStyleSheet(f"background-color: {self.background_color}; min-height: 30px;")
+        self.bg_color_button.setStyleSheet(f"""
+            background-color: {self.background_color};
+            min-height: 30px;
+            border: 2px solid #555555;
+            border-radius: 4px;
+        """)
         self.bg_color_button.setMaximumWidth(100)
         self.bg_color_button.clicked.connect(self._on_bg_color_button_clicked)
         tool_layout.addWidget(self.bg_color_button)
 
+        # Add another separator before blur properties
+        separator2 = QWidget()
+        separator2.setFixedHeight(1)
+        separator2.setStyleSheet("background-color: #555555;")
+        tool_layout.addWidget(separator2)
+
+        # Blur properties (initially hidden)
+        self.blur_properties = QWidget()
+        blur_layout = QVBoxLayout(self.blur_properties)
+        blur_layout.setSpacing(10)
+
+        # Blur radius
+        blur_radius_label = QLabel("Blur Radius:")
+        blur_radius_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        blur_layout.addWidget(blur_radius_label)
+
+        blur_radius_layout = QHBoxLayout()
+        blur_radius_layout.setSpacing(6)
+
+        self.blur_radius_spin = QSpinBox()
+        self.blur_radius_spin.setRange(1, 50)
+        self.blur_radius_spin.setValue(10)  # Default
+        self.blur_radius_spin.setStyleSheet("""
+            background-color: #444444;
+            color: white;
+            border: 1px solid #555555;
+            padding: 3px;
+        """)
+        self.blur_radius_spin.valueChanged.connect(self._on_blur_radius_changed)
+        blur_radius_layout.addWidget(self.blur_radius_spin)
+
+        self.blur_radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blur_radius_slider.setRange(1, 50)
+        self.blur_radius_slider.setValue(10)  # Default
+        self.blur_radius_slider.valueChanged.connect(self._on_blur_radius_changed)
+        blur_radius_layout.addWidget(self.blur_radius_slider)
+
+        blur_layout.addLayout(blur_radius_layout)
+
+        # Blur type
+        blur_type_label = QLabel("Blur Type:")
+        blur_type_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        blur_layout.addWidget(blur_type_label)
+
+        self.blur_type_combo = QComboBox()
+        self.blur_type_combo.addItems(["gaussian", "box", "motion"])
+        self.blur_type_combo.currentTextChanged.connect(self._on_blur_type_changed)
+        self.blur_type_combo.setStyleSheet("""
+            background-color: #444444;
+            color: white;
+            border: 1px solid #555555;
+            padding: 5px;
+            min-height: 25px;
+        """)
+        blur_layout.addWidget(self.blur_type_combo)
+
+        # Blur instructions
+        instructions_label = QLabel("Instructions:")
+        instructions_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        blur_layout.addWidget(instructions_label)
+
+        blur_instructions = QLabel("1. Draw a region to blur specific area\n2. Hold Ctrl+click to blur the entire image")
+        blur_instructions.setWordWrap(True)
+        blur_instructions.setStyleSheet("color: #CCCCCC;")
+        blur_layout.addWidget(blur_instructions)
+
+        tool_layout.addWidget(self.blur_properties)
+        self.blur_properties.setVisible(False)
+
+        # Add another separator before font section
+        separator3 = QWidget()
+        separator3.setFixedHeight(1)
+        separator3.setStyleSheet("background-color: #555555;")
+        tool_layout.addWidget(separator3)
+
         # Font selection for text tool
-        tool_layout.addWidget(QLabel("Text Font:"))
+        font_label = QLabel("Text Font:")
+        font_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        tool_layout.addWidget(font_label)
+
         self.font_button = QPushButton("Choose Font")
+        self.font_button.setStyleSheet(button_style)
         self.font_button.clicked.connect(self._on_font_button_clicked)
         tool_layout.addWidget(self.font_button)
 
         # Zoom controls
-        zoom_layout = QHBoxLayout()
         zoom_label = QLabel("Zoom:")
-        zoom_layout.addWidget(zoom_label)
+        zoom_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        tool_layout.addWidget(zoom_label)
+
+        zoom_layout = QHBoxLayout()
+        zoom_layout.setSpacing(6)
 
         zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setStyleSheet(button_style)
+        zoom_in_btn.setFixedWidth(40)
         zoom_in_btn.clicked.connect(self._on_zoom_in)
         zoom_layout.addWidget(zoom_in_btn)
 
         zoom_out_btn = QPushButton("-")
+        zoom_out_btn.setStyleSheet(button_style)
+        zoom_out_btn.setFixedWidth(40)
         zoom_out_btn.clicked.connect(self._on_zoom_out)
         zoom_layout.addWidget(zoom_out_btn)
 
         zoom_reset_btn = QPushButton("100%")
+        zoom_reset_btn.setStyleSheet(button_style)
         zoom_reset_btn.clicked.connect(self._on_zoom_reset)
         zoom_layout.addWidget(zoom_reset_btn)
 
@@ -499,7 +998,7 @@ class EditorTab(QWidget):
         tool_layout.addStretch()
 
         # Add tool panel to content layout
-        content_layout.addWidget(tool_panel)
+        content_layout.addWidget(tool_panel_container)
 
         # Create canvas area (right side)
         canvas_container = QScrollArea()
@@ -509,6 +1008,9 @@ class EditorTab(QWidget):
 
         # Create canvas widget
         self.canvas = CanvasWidget()
+
+        # Connect canvas signals
+        self.canvas.status_message.connect(self.status_message)
 
         # Add canvas to container
         canvas_container.setWidget(self.canvas)
@@ -605,9 +1107,13 @@ class EditorTab(QWidget):
         self.rect_button.setChecked(self.active_tool == ToolType.RECTANGLE)
         self.ellipse_button.setChecked(self.active_tool == ToolType.ELLIPSE)
         self.text_button.setChecked(self.active_tool == ToolType.TEXT)
+        self.blur_button.setChecked(self.active_tool == ToolType.BLUR)
 
         # Update canvas tool
         self.canvas.set_tool(self.active_tool)
+
+        # Show/hide tool-specific properties
+        self.blur_properties.setVisible(self.active_tool == ToolType.BLUR)
 
     def _on_tool_selected(self, tool):
         """Handle tool selection"""
@@ -619,7 +1125,8 @@ class EditorTab(QWidget):
             ToolType.LINE: "Line",
             ToolType.RECTANGLE: "Rectangle",
             ToolType.ELLIPSE: "Ellipse",
-            ToolType.TEXT: "Text"
+            ToolType.TEXT: "Text",
+            ToolType.BLUR: "Blur"
         }
 
         self.status_message.emit(f"Selected tool: {tool_names.get(tool, 'Unknown')}")
@@ -650,7 +1157,12 @@ class EditorTab(QWidget):
         color = QColorDialog.getColor(hex_to_qcolor(self.brush_color), self, "Select Brush Color")
         if color.isValid():
             self.brush_color = qcolor_to_hex(color)
-            self.color_button.setStyleSheet(f"background-color: {self.brush_color}; min-height: 30px;")
+            self.color_button.setStyleSheet(f"""
+                background-color: {self.brush_color};
+                min-height: 30px;
+                border: 2px solid #555555;
+                border-radius: 4px;
+            """)
             self.config.set("editor.brush_color", self.brush_color)
 
             # Update canvas
@@ -663,7 +1175,12 @@ class EditorTab(QWidget):
         color = QColorDialog.getColor(hex_to_qcolor(self.background_color), self, "Select Background Color")
         if color.isValid():
             self.background_color = qcolor_to_hex(color)
-            self.bg_color_button.setStyleSheet(f"background-color: {self.background_color}; min-height: 30px;")
+            self.bg_color_button.setStyleSheet(f"""
+                background-color: {self.background_color};
+                min-height: 30px;
+                border: 2px solid #555555;
+                border-radius: 4px;
+            """)
             self.config.set("editor.background_color", self.background_color)
             self.status_message.emit(f"Background color: {self.background_color}")
 
@@ -756,6 +1273,30 @@ class EditorTab(QWidget):
         if ok:
             self.canvas.set_font(font)
             self.status_message.emit(f"Font set to {font.family()}, {font.pointSize()}pt")
+
+    def _on_blur_radius_changed(self, radius):
+        """Handle blur radius change"""
+        # Update both controls
+        self.blur_radius_spin.blockSignals(True)
+        self.blur_radius_slider.blockSignals(True)
+
+        self.blur_radius_spin.setValue(radius)
+        self.blur_radius_slider.setValue(radius)
+
+        self.blur_radius_spin.blockSignals(False)
+        self.blur_radius_slider.blockSignals(False)
+
+        # Update canvas
+        self.canvas.set_blur_radius(radius)
+
+        self.status_message.emit(f"Blur radius: {radius}")
+
+    def _on_blur_type_changed(self, blur_type):
+        """Handle blur type change"""
+        # Update canvas
+        self.canvas.set_blur_type(blur_type)
+
+        self.status_message.emit(f"Blur type: {blur_type}")
 
     def load_image(self, image_model):
         """

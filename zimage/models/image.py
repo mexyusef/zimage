@@ -13,29 +13,56 @@ class ImageModel:
     """
     Model class for an image file
     """
-    def __init__(self, file_path):
+    def __init__(self, file_path=None, image=None, pixmap=None):
         """
         Initialize the image model
 
         Args:
-            file_path (str): Path to the image file
+            file_path (str, optional): Path to the image file
+            image (QImage, optional): QImage instance
+            pixmap (QPixmap, optional): QPixmap instance
         """
         self.file_path = file_path
-        self.file_info = QFileInfo(file_path)
-        self.file_name = os.path.basename(file_path)
-        self.extension = os.path.splitext(file_path)[1].lower()
+        self.image = image
+        self.pixmap = pixmap
 
-        # File information
-        file_stat = os.stat(file_path)
-        self.file_size = file_stat.st_size
-        self.file_size_str = self._format_size(self.file_size)
-        self.modified_time = datetime.fromtimestamp(file_stat.st_mtime)
+        # Initialize file information if file_path is provided
+        if file_path:
+            self.file_info = QFileInfo(file_path)
+            self.file_name = os.path.basename(file_path)
+            self.extension = os.path.splitext(file_path)[1].lower()
+
+            # File information
+            file_stat = os.stat(file_path)
+            self.file_size = file_stat.st_size
+            self.file_size_str = self._format_size(self.file_size)
+            self.modified_time = datetime.fromtimestamp(file_stat.st_mtime)
+        else:
+            self.file_info = None
+            self.file_name = "untitled"
+            self.extension = ""
+            self.file_size = 0
+            self.file_size_str = "0 B"
+            self.modified_time = datetime.now()
 
         # Image information (lazy loaded)
         self._width = None
         self._height = None
-        self._pixmap = None
         self._thumbnail_cache = {}
+
+        # Initialize dimensions if we have an image or pixmap
+        if image:
+            self._width = image.width()
+            self._height = image.height()
+            # Create pixmap from image if not provided
+            if not pixmap:
+                self.pixmap = QPixmap.fromImage(image)
+        elif pixmap:
+            self._width = pixmap.width()
+            self._height = pixmap.height()
+            # Create image from pixmap if not provided
+            if not image:
+                self.image = pixmap.toImage()
 
         logger.debug(f"Created image model for {self.file_name}")
 
@@ -69,9 +96,16 @@ class ImageModel:
             try:
                 # Load image to get dimensions
                 logger.debug(f"Loading image dimensions for {self.file_name}")
-                pixmap = self.get_pixmap()
-                self._width = pixmap.width()
-                self._height = pixmap.height()
+                if self.image:
+                    self._width = self.image.width()
+                    self._height = self.image.height()
+                elif self.pixmap:
+                    self._width = self.pixmap.width()
+                    self._height = self.pixmap.height()
+                else:
+                    pixmap = self.get_pixmap()
+                    self._width = pixmap.width()
+                    self._height = pixmap.height()
                 logger.debug(f"Image dimensions: {self._width}x{self._height}")
             except Exception as e:
                 logger.error(f"Error loading image dimensions for {self.file_name}: {str(e)}")
@@ -100,20 +134,32 @@ class ImageModel:
         Returns:
             QPixmap: Image pixmap
         """
-        if self._pixmap is None or force_reload:
+        # If we already have a pixmap and not forcing reload, return it
+        if self.pixmap is not None and not force_reload:
+            return self.pixmap
+
+        # If we have an image, convert it to pixmap
+        if self.image is not None and not force_reload:
+            self.pixmap = QPixmap.fromImage(self.image)
+            return self.pixmap
+
+        # If we have a file path, load the pixmap
+        if self.file_path:
             try:
                 logger.debug(f"Loading pixmap for {self.file_name}")
-                self._pixmap = QPixmap(self.file_path)
+                self.pixmap = QPixmap(self.file_path)
 
-                if self._pixmap.isNull():
+                if self.pixmap.isNull():
                     logger.error(f"Failed to load pixmap for {self.file_name}")
                 else:
-                    logger.debug(f"Successfully loaded pixmap ({self._pixmap.width()}x{self._pixmap.height()})")
+                    logger.debug(f"Successfully loaded pixmap ({self.pixmap.width()}x{self.pixmap.height()})")
+                    # Also load the image
+                    self.image = self.pixmap.toImage()
             except Exception as e:
                 logger.error(f"Error loading pixmap for {self.file_name}: {str(e)}")
-                self._pixmap = QPixmap()
+                self.pixmap = QPixmap()
 
-        return self._pixmap
+        return self.pixmap
 
     def get_thumbnail(self, size):
         """
@@ -203,7 +249,9 @@ class ImageModel:
         Returns:
             str: Directory path
         """
-        return os.path.dirname(self.file_path)
+        if self.file_path:
+            return os.path.dirname(self.file_path)
+        return ""
 
     def __str__(self):
         """String representation"""
